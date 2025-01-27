@@ -1,7 +1,4 @@
-# AI_ML_Advanced_Audio_Processing_Pipeline
-Artificial Intelligence / Machine Learning - Advanced_Audio_Processing_Pipeline
-
-# Audio Processing Pipeline
+# Artificial Intelligence / Machine Learning - Advanced Audio Processing Pipeline
 
 ## Overview
 
