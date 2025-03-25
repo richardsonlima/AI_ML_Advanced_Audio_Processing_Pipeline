@@ -10,14 +10,96 @@ import torch
 from demucs.separate import main as demucs_separate
 from voicefixer import VoiceFixer
 
-# ANSI color codes
-RESET = "\033[0m"
-BLUE = "\033[94m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-CYAN = "\033[96m"
+# ANSI color codes for terminal formatting
+RESET   = "\033[0m"
+BLUE    = "\033[94m"
+GREEN   = "\033[92m"
+YELLOW  = "\033[93m"
+RED     = "\033[91m"
+CYAN    = "\033[96m"
 MAGENTA = "\033[95m"
+
+def log_info(message):
+    print(f"{GREEN}==> {message}{RESET}")
+
+def log_warning(message):
+    print(f"{YELLOW}==> {message}{RESET}")
+
+def log_error(message):
+    print(f"{RED}==> {message}{RESET}")
+
+def log_phase(phase, message):
+    print(f"{CYAN}==> [{phase}] {message}{RESET}")
+
+def show_help_menu():
+    print(f"""
+{CYAN}==================================================
+       AUDIO PROCESSING PIPELINE - HELP MENU
+=================================================={RESET}
+
+{GREEN}DESCRIPTION:{RESET}
+This script performs audio processing in 4 phases:
+1. Noise reduction using DEMUCS
+2. Audio segmentation
+3. Voice separation with OpenUnmix
+4. Quality enhancement with VoiceFixer and vocal exciter
+
+{YELLOW}SYSTEM REQUIREMENTS:{RESET}
+- Python 3.8 or higher
+- PIP packages: torch, librosa, soundfile, openunmix, demucs, voicefixer
+- FFmpeg installed and available in PATH
+
+{MAGENTA}DIRECTORY STRUCTURE:{RESET}
+- Input directory: {BLUE}./source_audio/{RESET}
+  - Should contain .wav files for processing
+- Output directory: {BLUE}./Audio_Processing_Output/{RESET}
+  - Automatically created structure:
+    - Phase01_Reduced_Noise/
+    - Phase02_Segments/
+    - Phase03_Separated_Voices/
+    - Phase04_Final_Enhancements/
+
+{GREEN}FILE FORMATS:{RESET}
+- Input: .wav files (any sample rate)
+- Output: multiple .wav files organized by phase
+
+{YELLOW}CONFIGURABLE PARAMETERS:{RESET}
+- Segment duration: 60 seconds (modifiable in code)
+- DEMUCS models used: htdemucs and mdx_extra_q
+
+{MAGENTA}INSTALLATION INSTRUCTIONS:{RESET}
+1. First install system dependencies:
+   {GREEN}sudo apt-get install ffmpeg{RESET} (Linux)
+   or {GREEN}brew install ffmpeg{RESET} (Mac)
+   or download from {BLUE}https://ffmpeg.org/{RESET} (Windows/Mac)
+
+2. Then install Python packages:
+   {GREEN}pip install torch librosa soundfile openunmix demucs voicefixer{RESET}
+
+3. For GPU acceleration (optional):
+   {GREEN}pip install torch torchaudio --extra-index-url https://download.pytorch.org/whl/cu117{RESET}
+
+{CYAN}USAGE INSTRUCTIONS:{RESET}
+1. Place your .wav files in {BLUE}./source_audio/{RESET}
+2. Run the script:
+   {GREEN}python Processing_Pipeline.py{RESET}
+3. Processing will be automatic:
+   - Each phase will show colored logs in terminal
+   - Intermediate files will be saved in subfolders
+
+{RED}TROUBLESHOOTING:{RESET}
+- Verify all requirements are installed
+- Check write permissions in directories
+- Input files must be valid .wav files
+- For VoiceFixer errors, try running without CUDA
+
+{GREEN}EXAMPLE USAGE:{RESET}
+1. Create {BLUE}source_audio{RESET} folder and add audio.wav
+2. Run: {GREEN}python Processing_Pipeline.py{RESET}
+3. Results will be in {BLUE}Audio_Processing_Output/{RESET}
+
+{CYAN}=================================================={RESET}
+""")
 
 def log_info(message):
     print(f"{GREEN}==> {message}{RESET}")
@@ -209,6 +291,9 @@ class AudioProcessingPipeline:
         return True
 
 if __name__ == "__main__":
+    if "--help" in sys.argv or "-h" in sys.argv:
+        show_help_menu()
+        sys.exit(0)
     # Check FFmpeg first
     ffmpeg_path = check_ffmpeg()
     if not ffmpeg_path:
