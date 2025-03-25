@@ -4,3 +4,4 @@ soundfile
 openunmix 
 demucs 
 voicefixer
+ffmpeg-python
