@@ -40,10 +40,16 @@ Place your audio files in the `source_audio/` directory.
 
 ### Run the Pipeline
 
+For help:
+
+```bash
+python3 Processing_Pipeline.py --help
+```
+
 Execute the script to process audio files:
 
 ```bash
-python script_debug.py
+python3 Processing_Pipeline.py
 ```
 
 ### Output Structure
@@ -77,7 +83,7 @@ segment_duration = 60
 
 ```
 Audio_Processing_Pipeline/
-├── script_debug.py      # Main processing script
+├── Processing_Pipeline.py     # Main processing script
 ├── source_audio/        # Input audio files
 ├── Audio_Processing_Output/  # Processed audio outputs
 ├── README.md            # Documentation
