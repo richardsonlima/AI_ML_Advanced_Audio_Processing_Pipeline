@@ -5,3 +5,4 @@ openunmix
 demucs 
 voicefixer
 ffmpeg-python
+diffq
