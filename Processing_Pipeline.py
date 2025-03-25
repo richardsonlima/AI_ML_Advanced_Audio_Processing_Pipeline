@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
+import sys
 import subprocess
+import time
 from openunmix import predict
 import soundfile as sf
 import librosa
@@ -8,13 +10,13 @@ import torch
 from demucs.separate import main as demucs_separate
 from voicefixer import VoiceFixer
 
-# Códigos ANSI para formatação de cores no terminal
-RESET   = "\033[0m"
-BLUE    = "\033[94m"
-GREEN   = "\033[92m"
-YELLOW  = "\033[93m"
-RED     = "\033[91m"
-CYAN    = "\033[96m"
+# ANSI color codes
+RESET = "\033[0m"
+BLUE = "\033[94m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+CYAN = "\033[96m"
 MAGENTA = "\033[95m"
 
 def log_info(message):
@@ -29,209 +31,229 @@ def log_error(message):
 def log_phase(phase, message):
     print(f"{CYAN}==> [{phase}] {message}{RESET}")
 
+def check_ffmpeg():
+    """Check if FFmpeg is available in the system"""
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return "ffmpeg"
+    except FileNotFoundError:
+        possible_paths = [
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "C:\\FFmpeg\\bin\\ffmpeg.exe"
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        return None
+
+def convert_to_wav(input_file, output_dir, ffmpeg_path):
+    """Convert any audio file to WAV format"""
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+    output_file = os.path.join(output_dir, f"{base_name}.wav")
+    
+    log_phase("Conversion", f"Converting {os.path.basename(input_file)} to WAV...")
+    
+    try:
+        cmd = [
+            ffmpeg_path,
+            "-y", "-i", input_file,
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
+            output_file
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return output_file
+    except subprocess.CalledProcessError:
+        log_error(f"FFmpeg conversion failed for {os.path.basename(input_file)}")
+        return None
+    except Exception as e:
+        log_error(f"Unexpected error during conversion: {str(e)}")
+        return None
+
+def get_audio_files(input_dir, ffmpeg_path):
+    """Get all audio files, converting non-WAV files if needed"""
+    supported_exts = ['.wav', '.mp3', '.ogg', '.flac', '.aac', '.m4a', '.mp4']
+    wav_files = []
+    conversion_dir = os.path.join(input_dir, "converted")
+    os.makedirs(conversion_dir, exist_ok=True)
+
+    for file in os.listdir(input_dir):
+        file_path = os.path.join(input_dir, file)
+        if os.path.isdir(file_path) or file.startswith('.'):
+            continue
+            
+        ext = os.path.splitext(file)[1].lower()
+        
+        if ext == '.wav':
+            wav_files.append(file_path)
+        elif ext in supported_exts:
+            converted = convert_to_wav(file_path, conversion_dir, ffmpeg_path)
+            if converted:
+                wav_files.append(converted)
+            else:
+                log_warning(f"Failed to convert {file}")
+        else:
+            log_warning(f"Skipping unsupported file: {file}")
+
+    return wav_files
+
 class Phase01:
-    """Fase 1 - Reduzindo ruído com DEMUCS"""
+    """Phase 1 - Noise reduction with DEMUCS"""
     def __init__(self, model_names=None):
-        if model_names is None:
-            model_names = ["htdemucs", "mdx_extra_q"]
-        self.model_names = model_names
+        self.model_names = model_names or ["htdemucs", "mdx_extra_q"]
 
     def separate_sources(self, input_file, output_base_path):
         for model_name in self.model_names:
             model_output_path = os.path.join(output_base_path, model_name)
             os.makedirs(model_output_path, exist_ok=True)
-            log_phase("Phase 01", f"Separando fontes usando DEMUCS ({model_name}) no arquivo:\n    {input_file}")
+            log_phase("Phase 01", f"Processing with DEMUCS ({model_name}):\n    {input_file}")
             demucs_args = ["-n", model_name, input_file, "-o", model_output_path]
             demucs_separate(demucs_args)
-            log_phase("Phase 01", f"Separação concluída com {model_name}. Arquivos salvos em:\n    {model_output_path}")
-
-    def reduce_noise(self, input_file, output_dir):
-        log_phase("Phase 01", f"Processando arquivo com DEMUCS:\n    {input_file}")
-        os.makedirs(output_dir, exist_ok=True)
-        self.separate_sources(input_file, output_dir)
 
 class Phase02:
-    """Fase 2 - Dividindo áudio em segmentos"""
+    """Phase 2 - Audio segmentation"""
     def __init__(self, segment_duration):
         self.segment_duration = segment_duration
 
     def split_audio(self, input_file, output_dir):
-        log_phase("Phase 02", f"Dividindo o arquivo:\n    {input_file}\nem segmentos de {self.segment_duration // 60} minuto(s)...")
+        log_phase("Phase 02", f"Splitting {input_file} into {self.segment_duration}s segments")
         os.makedirs(output_dir, exist_ok=True)
-
-        if not os.path.exists(input_file):
-            log_error(f"Arquivo de entrada não encontrado: {input_file}")
-            return []
 
         try:
             audio, sr = librosa.load(input_file, sr=44100, mono=True)
+            total_duration = librosa.get_duration(y=audio, sr=sr)
+            segment_paths = []
+
+            for i in range(0, int(total_duration), self.segment_duration):
+                base_name = os.path.splitext(os.path.basename(input_file))[0]
+                segment_path = os.path.join(output_dir, f"{base_name}_segment_{i//self.segment_duration+1}.wav")
+                start = i * sr
+                end = min((i + self.segment_duration) * sr, len(audio))
+                sf.write(segment_path, audio[start:end], sr)
+                segment_paths.append(segment_path)
+
+            return segment_paths
         except Exception as e:
-            log_error(f"Erro ao carregar o áudio com librosa: {e}")
+            log_error(f"Segmentation failed: {str(e)}")
             return []
 
-        total_duration = librosa.get_duration(y=audio, sr=sr)
-        segment_paths = []
-
-        for i in range(0, int(total_duration), self.segment_duration):
-            base_name = os.path.splitext(os.path.basename(input_file))[0]
-            start_sample = i * sr
-            end_sample = min((i + self.segment_duration) * sr, len(audio))
-            segment = audio[start_sample:end_sample]
-            segment_path = os.path.join(output_dir, f"{base_name}_segment_{i // self.segment_duration + 1}.wav")
-            try:
-                sf.write(segment_path, segment, sr)
-                log_phase("Phase 02", f"Segmento salvo: {segment_path}")
-                segment_paths.append(segment_path)
-            except Exception as e:
-                log_error(f"Erro ao salvar o segmento a partir de {i} segundos: {e}")
-
-        return segment_paths
-
 class Phase03:
-    """Fase 3 - Separação de vozes com OpenUnmix"""
-    def __init__(self):
-        pass
-
+    """Phase 3 - Voice separation with OpenUnmix"""
     def separate_voices(self, segment_path, output_dir):
-        log_phase("Phase 03", f"Separando vozes do segmento:\n    {segment_path}")
+        log_phase("Phase 03", f"Separating voices from {segment_path}")
         os.makedirs(output_dir, exist_ok=True)
 
         try:
-            audio, sr = librosa.load(segment_path, sr=None)  # Preservar a taxa de amostragem original
-            audio_tensor = torch.tensor(audio).unsqueeze(0)  # Converter para tensor com dimensão de batch
+            audio, sr = librosa.load(segment_path, sr=None)
+            audio_tensor = torch.tensor(audio).unsqueeze(0)
             estimates = predict.separate(audio_tensor, rate=sr)
+
+            for instrument, audio_data in estimates.items():
+                if isinstance(audio_data, torch.Tensor):
+                    audio_data = audio_data.squeeze().detach().numpy()
+                output_file = os.path.join(output_dir, f"{os.path.basename(segment_path)}_{instrument}.wav")
+                sf.write(output_file, audio_data.T, sr)
+
         except Exception as e:
-            log_error(f"Erro ao separar vozes: {e}")
-            return
-
-        for instrument, audio_data in estimates.items():
-            if isinstance(audio_data, torch.Tensor):
-                audio_data = audio_data.squeeze().detach().numpy()  # Converter para numpy
-            elif audio_data.ndim == 3:  # Verificar dimensões
-                audio_data = audio_data.squeeze(0)  # Remover batch
-            elif audio_data.ndim == 2:
-                pass  # Nenhuma modificação necessária
-            else:
-                log_warning(f"Dimensão inesperada para áudio: {audio_data.shape}")
-                continue
-
-            output_file = os.path.join(output_dir, f"{os.path.basename(segment_path)}_{instrument}.wav")
-            sf.write(output_file, audio_data.T, sr)  # Transpor para salvar no formato correto
-            log_phase("Phase 03", f"Fonte '{instrument}' salva em:\n    {output_file}")
+            log_error(f"Voice separation failed: {str(e)}")
 
 class Phase04:
-    """Fase 4 - Melhorar qualidade do áudio com VoiceFixer e excitador vocal"""
-    def __init__(self, ffmpeg_binary):
-        self.ffmpeg_binary = ffmpeg_binary
+    """Phase 4 - Quality enhancement with VoiceFixer"""
+    def __init__(self, ffmpeg_path):
+        self.ffmpeg_path = ffmpeg_path
+        log_info("Initializing VoiceFixer...")
         self.voice_fixer = VoiceFixer()
 
     def enhance_audio(self, input_file, output_file):
-        log_phase("Phase 04", f"Melhorando qualidade do áudio com VoiceFixer:\n    {input_file}")
         try:
             self.voice_fixer.restore(input_file, output_file, cuda=False)
-            log_phase("Phase 04", f"Qualidade melhorada salva em:\n    {output_file}")
         except Exception as e:
-            log_error(f"Erro ao usar VoiceFixer: {e}")
-
-    def apply_vocal_exciter(self, input_file, output_file):
-        log_phase("Phase 04", f"Aplicando excitador vocal em:\n    {input_file}")
-        command = [
-            self.ffmpeg_binary,
-            "-y", "-i", input_file,
-            "-af", "bass=g=3:f=110:w=0.3,treble=g=5",
-            output_file
-        ]
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log_phase("Phase 04", f"Excitador vocal aplicado e salvo em:\n    {output_file}")
-
-    def process_audio(self, input_dir, output_dir):
-        log_phase("Phase 04", f"Processando áudios na pasta:\n    {input_dir}")
-        os.makedirs(output_dir, exist_ok=True)
-
-        for file_name in os.listdir(input_dir):
-            if file_name.lower().endswith(".wav"):
-                input_file = os.path.join(input_dir, file_name)
-                base_name = os.path.splitext(file_name)[0]
-
-                enhanced_file = os.path.join(output_dir, f"{base_name}_enhanced.wav")
-                self.enhance_audio(input_file, enhanced_file)
-
-                final_file = os.path.join(output_dir, f"{base_name}_final.wav")
-                self.apply_vocal_exciter(enhanced_file, final_file)
+            log_error(f"VoiceFixer enhancement failed: {str(e)}")
 
 class AudioProcessingPipeline:
-    def __init__(self, segment_duration, ffmpeg_binary):
+    def __init__(self, segment_duration, ffmpeg_path):
         self.phase01 = Phase01()
         self.phase02 = Phase02(segment_duration)
         self.phase03 = Phase03()
-        self.phase04 = Phase04(ffmpeg_binary)
+        self.phase04 = Phase04(ffmpeg_path)
 
     def process_audio(self, input_file, output_base_dir):
-        phase01_output_dir = os.path.join(output_base_dir, "Phase01_Reduced_Noise")
-        os.makedirs(phase01_output_dir, exist_ok=True)
+        # Phase 1: Noise reduction
+        phase01_dir = os.path.join(output_base_dir, "Phase01_Reduced_Noise")
+        self.phase01.separate_sources(input_file, phase01_dir)
 
-        phase02_output_dir = os.path.join(output_base_dir, "Phase02_Segments")
-        os.makedirs(phase02_output_dir, exist_ok=True)
+        # Phase 2: Segmentation
+        phase02_dir = os.path.join(output_base_dir, "Phase02_Segments")
+        main_output = os.path.join(phase01_dir, "htdemucs", os.path.basename(input_file))
+        segments = self.phase02.split_audio(main_output, phase02_dir)
+        if not segments:
+            return False
 
-        phase03_output_dir = os.path.join(output_base_dir, "Phase03_Separated_Voices")
-        os.makedirs(phase03_output_dir, exist_ok=True)
+        # Phase 3: Voice separation
+        phase03_dir = os.path.join(output_base_dir, "Phase03_Separated_Voices")
+        for segment in segments:
+            self.phase03.separate_voices(segment, phase03_dir)
 
-        phase04_output_dir = os.path.join(output_base_dir, "Phase04_Final_Enhancements")
-        os.makedirs(phase04_output_dir, exist_ok=True)
-
-        log_info(f"Iniciando processamento do arquivo:\n    {input_file}")
-        base_name = os.path.basename(input_file)
-        # Neste exemplo, definimos um nome para o arquivo de saída da Phase01,
-        # embora a DEMUCS gere múltiplos arquivos (um para cada modelo)
-        phase01_output_file = os.path.join(phase01_output_dir, base_name)
-
-        # Phase 01: Reduzir ruído (separação de fontes via DEMUCS)
-        self.phase01.reduce_noise(input_file, phase01_output_dir)
-
-        # Phase 02: Dividir áudio em segmentos  
-        # (Note que, conforme a lógica original, o arquivo base esperado para a Phase02
-        # é obtido a partir do Phase01; ajuste conforme necessário)
-        segment_paths = self.phase02.split_audio(phase01_output_file, phase02_output_dir)
-        if not segment_paths:
-            log_error(f"Falha na Phase 02 para o arquivo:\n    {input_file}\nEncerrando processamento deste arquivo.")
-            return
-
-        for segment_path in segment_paths:
-            # Phase 03: Separação de vozes com OpenUnmix
-            self.phase03.separate_voices(segment_path, phase03_output_dir)
-
-        # Phase 04: Aprimorar as vozes separadas
-        self.phase04.process_audio(phase03_output_dir, phase04_output_dir)
+        # Phase 4: Enhancement
+        phase04_dir = os.path.join(output_base_dir, "Phase04_Enhanced")
+        os.makedirs(phase04_dir, exist_ok=True)
+        for file in os.listdir(phase03_dir):
+            if file.endswith(".wav"):
+                input_path = os.path.join(phase03_dir, file)
+                output_path = os.path.join(phase04_dir, f"enhanced_{file}")
+                self.phase04.enhance_audio(input_path, output_path)
+        
+        return True
 
 if __name__ == "__main__":
-    ffmpeg_binary = "ffmpeg"
-    segment_duration = 60  # Duração do segmento em segundos (1 minuto)
+    # Check FFmpeg first
+    ffmpeg_path = check_ffmpeg()
+    if not ffmpeg_path:
+        log_error("FFmpeg not found. Please install FFmpeg first.")
+        log_info("Installation instructions:")
+        log_info("  macOS: brew install ffmpeg")
+        log_info("  Linux: sudo apt-get install ffmpeg")
+        log_info("  Windows: Download from ffmpeg.org")
+        sys.exit(1)
 
+    # Configuration
     input_dir = "source_audio"
-    output_base_dir = "Audio_Processing_Output"
+    output_dir = "Audio_Processing_Output"
+    segment_duration = 60  # seconds
 
-    if not os.path.exists(input_dir):
-        log_error(f"Diretório '{input_dir}' não encontrado!")
-        exit(1)
+    # Create input directory if needed
+    os.makedirs(input_dir, exist_ok=True)
 
-    # Listar arquivos .wav presentes na pasta source_audio (considerando possíveis letras maiúsculas)
-    all_files = os.listdir(input_dir)
-    wav_files = [file for file in all_files if file.lower().endswith(".wav")]
+    # Get and convert audio files
+    audio_files = get_audio_files(input_dir, ffmpeg_path)
+    if not audio_files:
+        log_error(f"No supported audio files found in {input_dir}")
+        log_info(f"Supported formats: .wav, .mp3, .ogg, .flac, .aac, .m4a, .mp4")
+        sys.exit(1)
 
-    log_info(f"Arquivos encontrados na pasta '{input_dir}':")
-    if wav_files:
-        for file in wav_files:
-            print(f"   - {file}")
-    else:
-        log_warning("Nenhum arquivo .wav encontrado!")
-        exit(1)
+    # Initialize pipeline
+    pipeline = AudioProcessingPipeline(segment_duration, ffmpeg_path)
+    log_info("Initializing VoiceFixer (may take several minutes first time)...")
+    try:
+        VoiceFixer()  # Pre-load models
+    except Exception as e:
+        log_error(f"VoiceFixer initialization failed: {str(e)}")
+        sys.exit(1)
 
-    pipeline = AudioProcessingPipeline(segment_duration, ffmpeg_binary)
+    # Process files
+    success_count = 0
+    for file in audio_files:
+        log_info(f"\nProcessing: {os.path.basename(file)}")
+        start_time = time.time()
+        if pipeline.process_audio(file, output_dir):
+            success_count += 1
+            log_info(f"Completed in {time.time()-start_time:.2f} seconds")
+        else:
+            log_error(f"Failed to process {os.path.basename(file)}")
 
-    # Processa cada arquivo encontrado na pasta de entrada
-    for input_file in sorted([os.path.join(input_dir, file) for file in wav_files]):
-        log_info(f"Iniciando pipeline para o arquivo:\n    {input_file}")
-        pipeline.process_audio(input_file, output_base_dir)
-        log_info(f"Processamento concluído para:\n    {input_file}\n")
-    
-    log_info("Todos os arquivos foram processados com sucesso!")
+    log_info(f"\nProcessing complete! {success_count}/{len(audio_files)} files processed successfully")
+    if success_count < len(audio_files):
+        log_warning("Some files failed to process. Check logs for details.")
